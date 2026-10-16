@@ -1,0 +1,8 @@
+build/
+third_party/
+installer/dist-out/
+installer/build-tmp/
+installer/payload/
+__pycache__/
+.DS_Store
+*.pyc
