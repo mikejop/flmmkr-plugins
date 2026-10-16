@@ -11,11 +11,12 @@ name = "FLMMKR FALSE COLOR Installer"
 cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--name", name,
        "--distpath", os.path.join(here, "dist-out"), "--workpath", os.path.join(here, "build-tmp"),
        "--specpath", os.path.join(here, "build-tmp"),
-       "--add-data", os.path.join(here, "payload") + sep + "payload"]
+       "--add-data", os.path.join(here, "payload") + sep + "payload",
+       "--add-data", os.path.join(here, "icon", "icon.png") + sep + "."]  # window icon (all OSes)
 if sys.platform.startswith("win"):
-    cmd += ["--onefile", "--uac-admin"]  # installs to Program Files\Common Files
+    cmd += ["--onefile", "--uac-admin", "--icon", os.path.join(here, "icon", "FC.ico")]  # installs to Program Files\Common Files
 elif sys.platform == "darwin":
-    cmd += ["--osx-bundle-identifier", "com.flmmkr.falsecolor.installer"]
+    cmd += ["--osx-bundle-identifier", "com.flmmkr.falsecolor.installer", "--icon", os.path.join(here, "icon", "FC.icns")]
 else:
     cmd += ["--onefile"]
 cmd.append(os.path.join(here, "falsecolor_installer.py"))

@@ -219,6 +219,14 @@ def run_gui():
     root.title(APP_NAME + " - Instalador")
     root.geometry("560x330")
     root.resizable(False, False)
+    try:  # icone FC na janela (Windows/Linux; no macOS o icone vem do .app)
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        for cand in (os.path.join(base, "icon.png"), os.path.join(base, "icon", "icon.png")):
+            if os.path.exists(cand):
+                root.iconphoto(True, tk.PhotoImage(file=cand))
+                break
+    except Exception:
+        pass
 
     state = {"scan": None}
     ttk.Label(root, text=APP_NAME, font=("Helvetica", 20, "bold")).pack(pady=(18, 2))
