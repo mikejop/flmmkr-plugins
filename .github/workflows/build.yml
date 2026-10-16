@@ -6,9 +6,10 @@ env:
 jobs:
   plugin:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - { os: macos-14,      name: mac,   extra: "-DFALSECOLOR_UNIVERSAL=ON", ocio_arch: '-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' }
+          - { os: macos-14,      name: mac,   extra: "-DFALSECOLOR_UNIVERSAL=ON", ocio_arch: '-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DOCIO_INSTALL_EXT_PACKAGES=MISSING' }
           - { os: windows-2022,  name: win,   extra: "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", ocio_arch: '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' }
           - { os: ubuntu-22.04,  name: linux, extra: "", ocio_arch: "" }
     runs-on: ${{ matrix.os }}
@@ -23,10 +24,11 @@ jobs:
           cmake -S ocio-src -B ocio-src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
             -DOCIO_BUILD_APPS=OFF -DOCIO_BUILD_PYTHON=OFF -DOCIO_BUILD_OPENFX=OFF -DOCIO_BUILD_TESTS=OFF \
             -DOCIO_BUILD_GPU_TESTS=OFF -DOCIO_BUILD_DOCS=OFF -DOCIO_INSTALL_EXT_PACKAGES=ALL \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON "${{ matrix.ocio_arch }}" \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${{ matrix.ocio_arch }} \
             -DCMAKE_INSTALL_PREFIX="$PWD/third_party/ocio-static"
           cmake --build ocio-src/build --config Release -j4
           cmake --install ocio-src/build --config Release
+          cp -R ocio-src/build/ext/dist/. third_party/ocio-static/
       - name: Build plugin
         shell: bash
         run: |
@@ -38,6 +40,7 @@ jobs:
   installer:
     needs: plugin
     strategy:
+      fail-fast: false
       matrix:
         include:
           - { os: macos-14,     name: mac }
