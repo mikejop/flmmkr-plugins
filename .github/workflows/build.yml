@@ -10,7 +10,7 @@ jobs:
       matrix:
         include:
           - { os: macos-14,      name: mac,   extra: "-DFALSECOLOR_UNIVERSAL=ON", ocio_arch: '-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DOCIO_INSTALL_EXT_PACKAGES=MISSING' }
-          - { os: windows-2022,  name: win,   extra: "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", ocio_arch: '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' }
+          - { os: windows-2022,  name: win,   extra: "", ocio_arch: "" }
           - { os: ubuntu-22.04,  name: linux, extra: "", ocio_arch: "" }
     runs-on: ${{ matrix.os }}
     steps:
