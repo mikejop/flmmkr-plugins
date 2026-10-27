@@ -2,6 +2,7 @@
 // Built once on the CPU as an RGBA8 image (straight alpha) and composited by the CPU renderer or
 // the GPU kernel. Rebuilt only when the frame size or the label switch changes.
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
