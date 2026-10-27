@@ -47,3 +47,15 @@ jobs:
           python installer/build_installer.py
       - uses: actions/upload-artifact@v4
         with: { name: "installer-${{ matrix.name }}", path: installer/dist-out }
+      - name: Self-test the packaged installer (real install into a temp folder)
+        shell: bash
+        run: |
+          D="$RUNNER_TEMP/ofx-test"
+          case "${{ matrix.name }}" in
+            mac)   "installer/dist-out/FLMMKR FALSE COLOR Installer.app/Contents/MacOS/FLMMKR FALSE COLOR Installer" --cli --dest "$D"; SUB=MacOS ;;
+            win)   "installer/dist-out/FLMMKR FALSE COLOR Installer.exe" --cli --dest "$D"; SUB=Win64 ;;
+            linux) "installer/dist-out/FLMMKR FALSE COLOR Installer" --cli --dest "$D"; SUB=Linux-x86-64 ;;
+          esac
+          F="$D/FalseColor.ofx.bundle/Contents/$SUB/FalseColor.ofx"
+          test -f "$F" && test ! -L "$F" && ls -la "$F"
+          if [ "${{ matrix.name }}" = mac ]; then lipo -archs "$F" | grep -q x86_64 && lipo -archs "$F" | grep -q arm64; fi

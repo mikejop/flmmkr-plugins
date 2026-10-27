@@ -7,3 +7,5 @@ __pycache__/
 .DS_Store
 *.pyc
 installer/releases/
+installer/payload.zip
+installer/dist-ci/

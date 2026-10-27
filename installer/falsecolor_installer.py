@@ -15,6 +15,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import zipfile
 
 APP_NAME = "FLMMKR FALSE COLOR"
 BUNDLE_NAME = "FalseColor.ofx.bundle"
@@ -24,11 +26,39 @@ IS_LINUX = sys.platform.startswith("linux")
 
 
 # ----------------------------------------------------------------------------- payload
+_extracted = None
+
+
+def _extract_payload_zip(zpath):
+    """Extrai payload.zip (o plugin vai zipado para o PyInstaller nao mexer nos binarios)."""
+    global _extracted
+    if _extracted is None:
+        out = tempfile.mkdtemp(prefix="flmmkr-fc-")
+        with zipfile.ZipFile(zpath) as z:
+            for info in z.infolist():
+                target = z.extract(info, out)
+                mode = (info.external_attr >> 16) & 0o777
+                if mode and not info.is_dir():
+                    os.chmod(target, mode)
+        _extracted = out
+    return _extracted
+
+
 def payload_dir():
-    """Pasta que contem FalseColor.ofx.bundle (dentro do app empacotado ou ao lado do script)."""
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    for cand in (os.path.join(base, "payload"), os.path.join(os.path.dirname(os.path.abspath(__file__)), "payload")):
-        if os.path.isdir(os.path.join(cand, BUNDLE_NAME)):
+    """Pasta que contem FalseColor.ofx.bundle: payload.zip dentro do app, ou payload/ ao lado do script."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    bases = [getattr(sys, "_MEIPASS", here), here]
+    if IS_MAC and getattr(sys, "frozen", False):  # app: dados ficam em Contents/Resources
+        bases.append(os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "Resources"))
+    for base in bases:
+        z = os.path.join(base, "payload.zip")
+        if os.path.isfile(z):
+            d = _extract_payload_zip(z)
+            if os.path.isdir(os.path.join(d, BUNDLE_NAME)):
+                return d
+    for base in bases:
+        cand = os.path.join(base, "payload")
+        if os.path.isdir(os.path.join(cand, BUNDLE_NAME)) and not os.path.islink(os.path.join(cand, BUNDLE_NAME)):
             return cand
     return None
 
@@ -194,8 +224,10 @@ def install(dest_dir, dry_run=False):
     else:
         _run_elevated(_install_shell_cmd(src, dest_dir))
     final = os.path.join(dest_dir, BUNDLE_NAME)
-    if not os.path.isdir(final):
-        raise InstallError("A copia terminou mas o plugin nao esta em " + final)
+    sub = "MacOS" if IS_MAC else ("Win64" if IS_WIN else "Linux-x86-64")
+    binary = os.path.join(final, "Contents", sub, "FalseColor.ofx")
+    if not os.path.isfile(binary) or os.path.islink(binary):
+        raise InstallError("A copia terminou mas o plugin nao esta completo em " + final)
     return final
 
 
