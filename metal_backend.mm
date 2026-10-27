@@ -10,10 +10,6 @@
 namespace fc {
 
 namespace {
-struct KArgs {  // must match FCArgs in falsecolor.metal
-    int w, h, srcBase, srcRow, convBase, convRow, dstBase, dstRow, lumaMode;
-    float mix;
-};
 std::mutex gCacheMutex;
 std::map<void*, id<MTLComputePipelineState>>& cache() {
     static std::map<void*, id<MTLComputePipelineState>> c;
@@ -25,6 +21,8 @@ struct MetalRunner::Impl {
     id<MTLDevice> dev = nil;
     id<MTLCommandQueue> q = nil;
     id<MTLComputePipelineState> pso = nil;
+    id<MTLBuffer> overlay = nil;
+    unsigned overlayGen = ~0u;
     id<MTLBuffer> stageBuf[4] = {nil, nil, nil, nil};
     size_t stageCap[4] = {0, 0, 0, 0};
     std::string err;
@@ -76,19 +74,31 @@ std::string MetalRunner::deviceName() const {
     return impl_->dev ? std::string(impl_->dev.name.UTF8String) : std::string("none");
 }
 
-bool MetalRunner::run(void* srcBuf, void* convBuf, void* dstBuf, const MetalArgs& a) {
+bool MetalRunner::setOverlay(const uint8_t* rgba, size_t bytes, unsigned generation) {
+    if (!impl_->ok) return false;
+    if (generation == impl_->overlayGen && impl_->overlay) return true;
+    impl_->overlay = (rgba && bytes) ? [impl_->dev newBufferWithBytes:rgba length:bytes options:MTLResourceStorageModeShared] : nil;
+    impl_->overlayGen = generation;
+    return rgba == nullptr || impl_->overlay != nil;
+}
+
+bool MetalRunner::run(void* srcBuf, void* dstBuf, const FCParams& p) {
     if (!impl_->ok) return false;
     @autoreleasepool {
+        if (!impl_->overlay) {  // the kernel always needs something bound at index 3
+            const uint32_t zero = 0;
+            impl_->overlay = [impl_->dev newBufferWithBytes:&zero length:4 options:MTLResourceStorageModeShared];
+        }
+        FCParams q = p;
+        if (impl_->overlayGen == ~0u) q.ovEnabled = 0;
         id<MTLCommandBuffer> cb = [impl_->q commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         [enc setComputePipelineState:impl_->pso];
         [enc setBuffer:(__bridge id<MTLBuffer>)srcBuf offset:0 atIndex:0];
-        [enc setBuffer:(__bridge id<MTLBuffer>)convBuf offset:0 atIndex:1];
-        [enc setBuffer:(__bridge id<MTLBuffer>)dstBuf offset:0 atIndex:2];
-        KArgs k{a.w, a.h, a.srcBase, a.srcRow, a.convBase, a.convRow, a.dstBase, a.dstRow, a.lumaMode, a.mix};
-        [enc setBytes:&k length:sizeof(k) atIndex:3];
-        NSUInteger tw = 16, th = 16;
-        [enc dispatchThreads:MTLSizeMake(a.w, a.h, 1) threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+        [enc setBuffer:(__bridge id<MTLBuffer>)dstBuf offset:0 atIndex:1];
+        [enc setBytes:&q length:sizeof(q) atIndex:2];
+        [enc setBuffer:impl_->overlay offset:0 atIndex:3];
+        [enc dispatchThreads:MTLSizeMake(p.w, p.h, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];

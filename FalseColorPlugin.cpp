@@ -1,10 +1,14 @@
-// FalseColorPlugin.cpp - OFX 1.4 image effect "FalseColor".
+// FalseColorPlugin.cpp - OFX 1.4 image effect "FLMMKR FALSE COLOR".
 //
 // Uses the plain OFX C API (headers from the OpenFX repo: ofxCore.h, ofxImageEffect.h, ofxParam.h,
 // ofxProperty.h, ofxGPURender.h) instead of the OFX Support Library C++ wrappers, because the
-// support library has no Metal-buffer image handling. Sections that follow the Support Library /
-// Resolve examples (descriptor, clips, render action, GPU properties) are marked [OFX].
+// support library has no Metal-buffer image handling. Sections that follow the OFX / Resolve
+// examples (descriptor, clips, render action, GPU properties) are marked [OFX].
+//
+// Rendering always goes to the GPU (Metal) when the host provides it. The CPU renderer is only the
+// safety net: hosts without Metal, or a GPU error on a frame (that frame is redone on the CPU).
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -18,15 +22,13 @@
 
 #include "cpu_render.h"
 #include "falsecolor_core.h"
-#include "ocio_pipeline.h"
+#include "overlay.h"
 #include "plugin_log.h"
 #include "render_path.h"
 #if defined(__APPLE__)
 #include "metal_backend.h"
 #endif
 // OpenCL / CUDA: prepared but disabled on this phase (kernels/falsecolor.cl / .cu).
-// #ifdef FALSECOLOR_GPU_OPENCL ... #endif
-// #ifdef FALSECOLOR_GPU_CUDA   ... #endif
 
 #define kPluginId "com.flmmkr.FalseColor"
 
@@ -37,25 +39,24 @@ static OfxParameterSuiteV1* gParam = nullptr;
 
 namespace {
 
-// Parameter names
+// Parameter names (stable ids; labels are what the user sees).
 const char* kPEnable = "enable";
+const char* kPSource = "source";
 const char* kPMix = "mix";
-const char* kPInput = "inputSpace";
-const char* kPAces = "acesVersion";
-const char* kPConfig = "ocioConfig";
-const char* kPView = "outputView";
-const char* kPLuma = "lumaWeights";
-const char* kPPath = "renderPath";
+const char* kPScale = "showScale";
+const char* kPLabels = "showLabels";
 
 struct Instance {
     OfxImageEffectHandle effect = nullptr;
     OfxImageClipHandle src = nullptr, dst = nullptr;
-    OfxParamHandle pEnable = nullptr, pMix = nullptr, pInput = nullptr, pAces = nullptr,
-                   pConfig = nullptr, pView = nullptr, pLuma = nullptr, pPath = nullptr;
+    OfxParamHandle pEnable = nullptr, pSource = nullptr, pMix = nullptr, pScale = nullptr, pLabels = nullptr;
     std::mutex mutex;
-    fc::OcioPipeline ocio;
-    bool ocioWarned = false;
-    std::string lastErr;
+
+    // Scale overlay cache: rebuilt only when frame size or the label switch changes.
+    fc::ScaleOverlay overlay;
+    int ovFrameW = -1, ovFrameH = -1, ovLabels = -1;
+    unsigned ovGeneration = 0;
+
     int lastBackend = -1;
 #if defined(__APPLE__)
     std::unique_ptr<fc::MetalRunner> metal;
@@ -73,9 +74,6 @@ Instance* getInstance(OfxImageEffectHandle h) {
 
 int getInt(OfxParamHandle p, double t) { int v = 0; gParam->paramGetValueAtTime(p, t, &v); return v; }
 double getDouble(OfxParamHandle p, double t) { double v = 0; gParam->paramGetValueAtTime(p, t, &v); return v; }
-std::string getString(OfxParamHandle p, double t) {
-    char* s = nullptr; gParam->paramGetValueAtTime(p, t, &s); return s ? s : "";
-}
 
 // ---------------------------------------------------------------------------------------------
 // [OFX] Describe
@@ -97,15 +95,13 @@ OfxStatus describe(OfxImageEffectHandle effect) {
     return kOfxStatOK;
 }
 
-void defineChoice(OfxParamSetHandle ps, const char* name, const char* label, int def,
-                  std::initializer_list<const char*> opts, const char* hint) {
+OfxPropertySetHandle defineBool(OfxParamSetHandle ps, const char* name, const char* label, int def, const char* hint) {
     OfxPropertySetHandle pp;
-    gParam->paramDefine(ps, kOfxParamTypeChoice, name, &pp);
+    gParam->paramDefine(ps, kOfxParamTypeBoolean, name, &pp);
     gProp->propSetString(pp, kOfxPropLabel, 0, label);
     gProp->propSetString(pp, kOfxParamPropHint, 0, hint);
-    int i = 0;
-    for (auto o : opts) gProp->propSetString(pp, kOfxParamPropChoiceOption, i++, o);
     gProp->propSetInt(pp, kOfxParamPropDefault, 0, def);
+    return pp;
 }
 
 // [OFX] DescribeInContext: clips + parameters
@@ -120,9 +116,15 @@ OfxStatus describeInContext(OfxImageEffectHandle effect) {
     gEffect->getParamSet(effect, &ps);
     OfxPropertySetHandle pp;
 
-    gParam->paramDefine(ps, kOfxParamTypeBoolean, kPEnable, &pp);
-    gProp->propSetString(pp, kOfxPropLabel, 0, "Enable");
-    gProp->propSetInt(pp, kOfxParamPropDefault, 0, 1);
+    defineBool(ps, kPEnable, "Enable", 1, "Desligado: a imagem passa sem alteracao.");
+
+    gParam->paramDefine(ps, kOfxParamTypeChoice, kPSource, &pp);
+    gProp->propSetString(pp, kOfxPropLabel, 0, "Source");
+    gProp->propSetString(pp, kOfxParamPropHint, 0,
+                         "Espaco de cor / curva da imagem que chega no no. O false color decodifica essa curva "
+                         "e mede a luminancia como um sinal Rec.709.");
+    for (int i = 0; i < FC_NUM_SOURCES; ++i) gProp->propSetString(pp, kOfxParamPropChoiceOption, i, fc::kSourceNames[i]);
+    gProp->propSetInt(pp, kOfxParamPropDefault, 0, FC_SRC_REC709);
 
     gParam->paramDefine(ps, kOfxParamTypeDouble, kPMix, &pp);
     gProp->propSetString(pp, kOfxPropLabel, 0, "Mix");
@@ -132,28 +134,8 @@ OfxStatus describeInContext(OfxImageEffectHandle effect) {
     gProp->propSetDouble(pp, kOfxParamPropDisplayMin, 0, 0.0);
     gProp->propSetDouble(pp, kOfxParamPropDisplayMax, 0, 1.0);
 
-    defineChoice(ps, kPInput, "Input Space", 0,
-                 {"Display Rec.709 (pos-ODT)", "ACEScg (linear)", "ACEScct (log)", "ACES2065-1 (linear)"},
-                 "Colour space of the incoming image. ACES options need an OCIO Config.");
-    defineChoice(ps, kPAces, "ACES Version", 0, {"Auto (do config)", "ACES 1.x (legado)", "ACES 2.0"},
-                 "Selects which Output Views are offered. Does not change the OCIO maths.");
-
-    gParam->paramDefine(ps, kOfxParamTypeString, kPConfig, &pp);
-    gProp->propSetString(pp, kOfxPropLabel, 0, "OCIO Config");
-    gProp->propSetString(pp, kOfxParamPropStringMode, 0, kOfxParamStringIsFilePath);
-    gProp->propSetString(pp, kOfxParamPropDefault, 0, "");
-    gProp->propSetString(pp, kOfxParamPropHint, 0, "Path to the .ocio file (required for ACES input spaces).");
-
-    // Output View is an editable string (dynamic choice lists are not portable across hosts).
-    // The available views are printed in the log (~/Library/Logs/FalseColor.log).
-    gParam->paramDefine(ps, kOfxParamTypeString, kPView, &pp);
-    gProp->propSetString(pp, kOfxPropLabel, 0, "Output View");
-    gProp->propSetString(pp, kOfxParamPropDefault, 0, "");
-    gProp->propSetString(pp, kOfxParamPropHint, 0, "View name from the config. Empty = first SDR Rec.709 view for the ACES version.");
-
-    defineChoice(ps, kPLuma, "Luma Weights", 0, {"Rec.709", "Rec.2020"}, "Weights used for Y.");
-    defineChoice(ps, kPPath, "Render Path", 0, {"Automatico", "CPU", "GPU"},
-                 "Automatico uses Metal when the host provides it.");
+    defineBool(ps, kPScale, "Escala", 1, "Mostra a escala do Sistema de Zonas no lado esquerdo da imagem.");
+    defineBool(ps, kPLabels, "Legendas", 1, "Mostra o significado de cada cor na escala.");
     return kOfxStatOK;
 }
 
@@ -162,10 +144,9 @@ OfxStatus createInstance(OfxImageEffectHandle effect) {
     inst->effect = effect;
     OfxParamSetHandle ps;
     gEffect->getParamSet(effect, &ps);
-    auto get = [&](const char* n) { OfxParamHandle h; gParam->paramGetHandle(ps, n, &h, nullptr); return h; };
-    inst->pEnable = get(kPEnable); inst->pMix = get(kPMix); inst->pInput = get(kPInput);
-    inst->pAces = get(kPAces); inst->pConfig = get(kPConfig); inst->pView = get(kPView);
-    inst->pLuma = get(kPLuma); inst->pPath = get(kPPath);
+    auto get = [&](const char* n) { OfxParamHandle h = nullptr; gParam->paramGetHandle(ps, n, &h, nullptr); return h; };
+    inst->pEnable = get(kPEnable); inst->pSource = get(kPSource); inst->pMix = get(kPMix);
+    inst->pScale = get(kPScale); inst->pLabels = get(kPLabels);
     gEffect->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName, &inst->src, nullptr);
     gEffect->clipGetHandle(effect, kOfxImageEffectOutputClipName, &inst->dst, nullptr);
     OfxPropertySetHandle ep;
@@ -177,25 +158,6 @@ OfxStatus createInstance(OfxImageEffectHandle effect) {
 OfxStatus destroyInstance(OfxImageEffectHandle effect) {
     delete getInstance(effect);
     return kOfxStatOK;
-}
-
-// Re-reads colour parameters; (re)builds the OCIO processor only when something changed.
-// Returns true if the ACES path is usable. Call with inst->mutex held.
-bool configureOcio(Instance* inst, double t) {
-    int space = getInt(inst->pInput, t);
-    if (space == fc::INPUT_DISPLAY_709) return false;
-    fc::OcioSetup s;
-    s.inputSpace = space;
-    s.acesVersion = getInt(inst->pAces, t);
-    s.configPath = getString(inst->pConfig, t);
-    s.view = getString(inst->pView, t);
-    std::string err;
-    bool ok = inst->ocio.configure(s, err);
-    if (!ok && err != inst->lastErr) {
-        fc::logLine("ACES path unavailable, using Display Rec.709: " + err);
-    }
-    inst->lastErr = ok ? "" : err;
-    return ok;
 }
 
 // [OFX] IsIdentity: Enable off => copy input unchanged (host does the copy).
@@ -211,20 +173,6 @@ OfxStatus isIdentity(OfxImageEffectHandle effect, OfxPropertySetHandle in, OfxPr
     return kOfxStatReplyDefault;
 }
 
-// [OFX] InstanceChanged: log views when the config / version / input space changes.
-OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
-    Instance* inst = getInstance(effect);
-    char* name = nullptr;
-    gProp->propGetString(in, kOfxPropName, 0, &name);
-    if (!name) return kOfxStatReplyDefault;
-    std::string n = name;
-    if (n == kPConfig || n == kPAces || n == kPInput || n == kPView) {
-        std::lock_guard<std::mutex> lock(inst->mutex);
-        configureOcio(inst, 0);
-    }
-    return kOfxStatOK;
-}
-
 struct Img {
     OfxPropertySetHandle props = nullptr;
     void* data = nullptr;
@@ -238,6 +186,26 @@ bool fetchImage(OfxImageClipHandle clip, double t, Img& img) {
     for (int i = 0; i < 4; ++i) gProp->propGetInt(img.props, kOfxImagePropBounds, i, &img.bounds[i]);
     gProp->propGetInt(img.props, kOfxImagePropRowBytes, 0, &img.rowBytes);
     return img.data != nullptr;
+}
+
+// Frame rectangle in pixel coordinates (x1, y1, x2, y2), from the source RoD and the render scale.
+void frameRect(Instance* inst, double t, OfxPropertySetHandle in, const Img& fallback, int r[4]) {
+    OfxRectD rod{0, 0, 0, 0};
+    double rs[2] = {1.0, 1.0}, par = 1.0;
+    gProp->propGetDouble(in, kOfxImageEffectPropRenderScale, 0, &rs[0]);
+    gProp->propGetDouble(in, kOfxImageEffectPropRenderScale, 1, &rs[1]);
+    OfxPropertySetHandle cp = nullptr;
+    if (gEffect->clipGetPropertySet(inst->src, &cp) == kOfxStatOK && cp)
+        gProp->propGetDouble(cp, kOfxImagePropPixelAspectRatio, 0, &par);
+    if (par <= 0) par = 1.0;
+    if (gEffect->clipGetRegionOfDefinition(inst->src, t, &rod) == kOfxStatOK && rod.x2 > rod.x1 && rod.y2 > rod.y1) {
+        r[0] = (int)std::floor(rod.x1 * rs[0] / par);
+        r[1] = (int)std::floor(rod.y1 * rs[1]);
+        r[2] = (int)std::ceil(rod.x2 * rs[0] / par);
+        r[3] = (int)std::ceil(rod.y2 * rs[1]);
+    } else {
+        for (int i = 0; i < 4; ++i) r[i] = fallback.bounds[i];
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -268,27 +236,40 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
     if (!fetchImage(inst->src, t, src)) return kOfxStatFailed;
     if (!fetchImage(inst->dst, t, dst)) { gEffect->clipReleaseImage(src.props); return kOfxStatFailed; }
 
-    fc::RenderParams rp;
-    rp.enable = getInt(inst->pEnable, t) != 0;
-    rp.mix = (float)getDouble(inst->pMix, t);
-    rp.lumaMode = getInt(inst->pLuma, t);
-    const bool aces = configureOcio(inst, t);
-    fc::ConvertFn convFn = [inst](float* px, size_t n) { inst->ocio.apply(px, n); };
-    const fc::ConvertFn* conv = aces ? &convFn : nullptr;
+    // ---- parameters -> FCParams (identical for CPU and GPU) -----------------------------------
+    FCParams p{};
+    p.w = w; p.h = h;
+    p.srcRow = src.rowBytes / 4;
+    p.dstRow = dst.rowBytes / 4;
+    p.srcBase = (rw[1] - src.bounds[1]) * p.srcRow + (rw[0] - src.bounds[0]) * 4;
+    p.dstBase = (rw[1] - dst.bounds[1]) * p.dstRow + (rw[0] - dst.bounds[0]) * 4;
+    p.winX0 = rw[0]; p.winY0 = rw[1];
+    p.source = getInt(inst->pSource, t);
+    if (p.source < 0 || p.source >= FC_NUM_SOURCES) p.source = FC_SRC_REC709;
+    p.mix = (float)getDouble(inst->pMix, t);
+    bool ident = true;
+    p.mat = fc::sourceToRec709(p.source, &ident);
+    p.matIdentity = ident ? 1 : 0;
 
-    const int srcRowF = src.rowBytes / 4, dstRowF = dst.rowBytes / 4;
-    const int srcBase = (rw[1] - src.bounds[1]) * srcRowF + (rw[0] - src.bounds[0]) * 4;
-    const int dstBase = (rw[1] - dst.bounds[1]) * dstRowF + (rw[0] - dst.bounds[0]) * 4;
-
-    fc::PathChoice choice = (fc::PathChoice)getInt(inst->pPath, t);
-    fc::Backend backend = fc::chooseBackend(choice, hostGpuBuffers);
-    if (choice == fc::PathChoice::Gpu && !hostGpuBuffers && inst->lastBackend != -2) {
-        fc::logLine("Render Path = GPU requested but the host did not provide Metal: using CPU");
-        inst->lastBackend = -2;
+    int fr[4];
+    frameRect(inst, t, in, src, fr);
+    p.frameX0 = fr[0]; p.frameTop = fr[3];
+    const bool showScale = getInt(inst->pScale, t) != 0;
+    const int labels = getInt(inst->pLabels, t) != 0 ? 1 : 0;
+    if (showScale) {
+        const int fw = fr[2] - fr[0], fh = fr[3] - fr[1];
+        if (fw != inst->ovFrameW || fh != inst->ovFrameH || labels != inst->ovLabels) {
+            inst->overlay = fc::buildScaleOverlay(fw, fh, labels != 0);
+            inst->ovFrameW = fw; inst->ovFrameH = fh; inst->ovLabels = labels;
+            ++inst->ovGeneration;
+        }
     }
+    const bool ov = showScale && inst->overlay.valid();
+    p.ovEnabled = ov ? 1 : 0;
+    if (ov) { p.ovX = inst->overlay.x; p.ovY = inst->overlay.y; p.ovW = inst->overlay.w; p.ovH = inst->overlay.h; }
+    const uint8_t* ovData = ov ? inst->overlay.rgba.data() : nullptr;
 
     std::string deviceName = "host CPU";
-    std::string gpuNote;
     fc::RunResult result{fc::Backend::Cpu, false, ""};
 
 #if defined(__APPLE__)
@@ -297,58 +278,42 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
         if (!inst->metal || inst->metalQueue != queue) {
             inst->metal.reset(new fc::MetalRunner(queue));
             inst->metalQueue = queue;
+            inst->lastBackend = -1;
         }
         fc::MetalRunner& mr = *inst->metal;
         deviceName = mr.deviceName();
-
         auto gpuPath = [&](std::string& err) -> bool {
             if (!mr.ok()) { err = mr.lastError(); return false; }
-            fc::MetalArgs a;
-            a.w = w; a.h = h; a.lumaMode = rp.lumaMode; a.mix = rp.mix;
-            a.srcBase = srcBase; a.srcRow = srcRowF; a.dstBase = dstBase; a.dstRow = dstRowF;
-            a.convBase = srcBase; a.convRow = srcRowF;
-            void* convBuf = src.data;
-            if (rp.enable && aces) {
-                // OCIO GPU shader generation is not wired up (see README "Nao implementado"):
-                // the OCIO conversion runs on the CPU in a shared staging buffer, the band
-                // mapping stays on the GPU.
-                void* st = mr.stage(0, (size_t)w * h * 4);
-                if (!st) { err = "staging buffer allocation failed"; return false; }
-                if (!mr.blit(src.data, srcBase, srcRowF, 0, w, h, true)) { err = "blit failed"; return false; }
-                inst->ocio.apply(mr.stagePtr(0), (size_t)w * h);
-                convBuf = st; a.convBase = 0; a.convRow = w * 4;
-                gpuNote = " (OCIO conversion on CPU)";
-            }
-            if (!rp.enable) {  // plain copy through the same kernel with mix 0
-                a.mix = 0.0f;
-            }
-            if (!mr.run(src.data, convBuf, dst.data, a)) { err = mr.lastError(); return false; }
+            if (ov && !mr.setOverlay(ovData, inst->overlay.rgba.size(), inst->ovGeneration)) { err = "overlay upload failed"; return false; }
+            if (!mr.run(src.data, dst.data, p)) { err = mr.lastError(); return false; }
             return true;
         };
         auto cpuViaStaging = [&] {
-            // CPU maths on host GPU buffers: blit to shared staging, run the reference renderer, blit back.
-            size_t floats = (size_t)w * h * 4;
+            // Same maths on the CPU over the host's GPU buffers: blit in, render, blit back.
+            const size_t floats = (size_t)w * h * 4;
             if (!mr.stage(0, floats) || !mr.stage(1, floats)) return;
-            mr.blit(src.data, srcBase, srcRowF, 0, w, h, true);
-            fc::cpuRender(mr.stagePtr(0), w * 4, mr.stagePtr(1), w * 4, w, h, rp, conv);
-            mr.blit(dst.data, dstBase, dstRowF, 1, w, h, false);
+            mr.blit(src.data, p.srcBase, p.srcRow, 0, w, h, true);
+            FCParams q = p;
+            q.srcBase = q.dstBase = 0;
+            q.srcRow = q.dstRow = w * 4;
+            fc::cpuRender(mr.stagePtr(0), mr.stagePtr(1), q, ovData);
+            mr.blit(dst.data, p.dstBase, p.dstRow, 1, w, h, false);
         };
-        result = fc::runWithFallback(backend, gpuPath, cpuViaStaging);
+        result = fc::runWithFallback(fc::Backend::Metal, gpuPath, cpuViaStaging);
     } else
 #endif
     {
-        const float* sp = (const float*)((const char*)src.data) + srcBase;
-        float* dp = (float*)((char*)dst.data) + dstBase;
-        fc::cpuRender(sp, srcRowF, dp, dstRowF, w, h, rp, conv);
+        fc::cpuRender((const float*)src.data, (float*)dst.data, p, ovData);
     }
 
-    if (result.fellBack) fc::logLine("GPU failed for this frame, CPU fallback used: " + result.error);
-    int bk = result.used == fc::Backend::Metal ? 1 : 0;
-    double ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+    if (result.fellBack) fc::logLine("GPU falhou neste frame, refeito na CPU: " + result.error);
+    const int bk = result.used == fc::Backend::Metal ? 1 : 0;
+    const double ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
     if (bk != inst->lastBackend || fc::verboseLog()) {
         inst->lastBackend = bk;
-        fc::logLine(std::string("render backend: ") + (bk ? "Metal" : "CPU") + gpuNote + ", device: " + deviceName +
-                    ", " + std::to_string(ms) + " ms/frame (" + std::to_string(w) + "x" + std::to_string(h) + ")");
+        fc::logLine(std::string("render backend: ") + (bk ? "Metal" : "CPU") + ", device: " + deviceName +
+                    ", source: " + fc::kSourceNames[p.source] + ", " + std::to_string(ms) + " ms/frame (" +
+                    std::to_string(w) + "x" + std::to_string(h) + ")");
     }
 
     gEffect->clipReleaseImage(src.props);
@@ -372,9 +337,9 @@ OfxStatus pluginMain(const char* action, const void* handle, OfxPropertySetHandl
         if (!std::strcmp(action, kOfxActionCreateInstance)) return createInstance(effect);
         if (!std::strcmp(action, kOfxActionDestroyInstance)) return destroyInstance(effect);
         if (!std::strcmp(action, kOfxImageEffectActionIsIdentity)) return isIdentity(effect, in, out);
-        if (!std::strcmp(action, kOfxActionInstanceChanged)) return instanceChanged(effect, in);
         if (!std::strcmp(action, kOfxImageEffectActionRender)) return render(effect, in);
-        // RoD defaults to the input RoD and RoI to the output RoI (point operator): host defaults apply.
+        // RoD = input RoD and RoI = output RoI (point operator + overlay drawn inside the frame):
+        // the host defaults apply.
     } catch (const std::exception& e) {
         fc::logLine(std::string("exception in action ") + action + ": " + e.what());
         return kOfxStatFailed;
@@ -386,7 +351,7 @@ OfxStatus pluginMain(const char* action, const void* handle, OfxPropertySetHandl
 
 void setHost(OfxHost* h) { gHost = h; }
 
-OfxPlugin gPlugin = {kOfxImageEffectPluginApi, 1, kPluginId, 1, 0, setHost, pluginMain};
+OfxPlugin gPlugin = {kOfxImageEffectPluginApi, 1, kPluginId, 1, 1, setHost, pluginMain};
 
 }  // namespace
 

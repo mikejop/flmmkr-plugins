@@ -1,23 +1,16 @@
-// cpu_render.h - reference CPU renderer (multithreaded). No OFX/OCIO dependency:
-// the colour-space conversion is injected as a batch callback.
+// cpu_render.h - reference CPU renderer (multithreaded) around fc_shared.h.
 #pragma once
-#include <cstddef>
-#include <functional>
+#include <cstdint>
+
+#include "fc_shared.h"
 
 namespace fc {
 
-// Converts `pixelCount` contiguous RGBA float pixels in place (OCIO batch apply).
-using ConvertFn = std::function<void(float* rgba, size_t pixelCount)>;
+// src/dst are the image buffers' base pointers; p.srcBase/p.dstBase/p.*Row locate the render window
+// (exactly as for the GPU kernel). overlay: RGBA8 scale image (p.ovW x p.ovH) or null.
+void cpuRender(const float* src, float* dst, const FCParams& p, const uint8_t* overlay);
 
-struct RenderParams {
-    bool enable = true;
-    float mix = 1.0f;
-    int lumaMode = 0;  // LumaMode
-};
-
-// src/dst point at the first pixel of the window; rowFloats = row stride in floats.
-// conv may be null (Display Rec.709: no conversion).
-void cpuRender(const float* src, ptrdiff_t srcRowFloats, float* dst, ptrdiff_t dstRowFloats, int w,
-               int h, const RenderParams& p, const ConvertFn* conv);
+// The per-pixel body shared by every CPU caller (and mirrored by the Metal kernel).
+FCPixel renderPixel(const float* src, const FCParams& p, const uint8_t* overlay, int gx, int gy);
 
 }  // namespace fc

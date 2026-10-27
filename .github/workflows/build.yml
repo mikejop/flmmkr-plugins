@@ -1,34 +1,20 @@
-# NOT TESTED: written for GitHub Actions but never run. macOS is the only platform verified locally.
+# Runs on GitHub Actions. macOS is also verified locally; Windows/Linux are verified only by the CI build + unit tests.
 name: build-and-package
 on: { workflow_dispatch: {}, push: { tags: ["v*"] } }
-env:
-  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 jobs:
   plugin:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,      name: mac,   extra: "-DFALSECOLOR_UNIVERSAL=ON", ocio_arch: '-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DOCIO_INSTALL_EXT_PACKAGES=MISSING' }
-          - { os: windows-2022,  name: win,   extra: "", ocio_arch: "" }
-          - { os: ubuntu-22.04,  name: linux, extra: "", ocio_arch: "" }
+          - { os: macos-14,      name: mac,   extra: "-DFALSECOLOR_UNIVERSAL=ON" }
+          - { os: windows-2022,  name: win,   extra: "" }
+          - { os: ubuntu-22.04,  name: linux, extra: "" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: OpenFX headers
         run: git clone --depth 1 https://github.com/AcademySoftwareFoundation/openfx third_party/openfx
-      - name: Static OpenColorIO
-        shell: bash
-        run: |
-          git clone --depth 1 --branch v2.4.2 https://github.com/AcademySoftwareFoundation/OpenColorIO.git ocio-src
-          cmake -S ocio-src -B ocio-src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-            -DOCIO_BUILD_APPS=OFF -DOCIO_BUILD_PYTHON=OFF -DOCIO_BUILD_OPENFX=OFF -DOCIO_BUILD_TESTS=OFF \
-            -DOCIO_BUILD_GPU_TESTS=OFF -DOCIO_BUILD_DOCS=OFF -DOCIO_INSTALL_EXT_PACKAGES=ALL \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${{ matrix.ocio_arch }} \
-            -DCMAKE_INSTALL_PREFIX="$PWD/third_party/ocio-static"
-          cmake --build ocio-src/build --config Release -j4
-          cmake --install ocio-src/build --config Release
-          cp -R ocio-src/build/ext/dist/. third_party/ocio-static/
       - name: Build plugin
         shell: bash
         run: |

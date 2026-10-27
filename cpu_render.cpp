@@ -1,61 +1,43 @@
 #include "cpu_render.h"
 
 #include <algorithm>
-#include <cstring>
+#include <cstddef>
 #include <thread>
 #include <vector>
 
-#include "falsecolor_core.h"
-
 namespace fc {
 
-namespace {
-constexpr int kStrip = 16;  // rows converted per OCIO batch
-
-void renderRows(const float* src, ptrdiff_t srcRow, float* dst, ptrdiff_t dstRow, int w, int y0,
-                int y1, const RenderParams& p, const ConvertFn* conv) {
-    std::vector<float> buf;
-    if (conv) buf.resize((size_t)w * 4 * std::min(kStrip, y1 - y0));
-    for (int ys = y0; ys < y1; ys += kStrip) {
-        const int rows = std::min(kStrip, y1 - ys);
-        if (conv) {
-            for (int r = 0; r < rows; ++r)
-                std::memcpy(&buf[(size_t)r * w * 4], src + (ptrdiff_t)(ys + r) * srcRow,
-                            (size_t)w * 4 * sizeof(float));
-            (*conv)(buf.data(), (size_t)w * rows);  // one batch, never per pixel
+FCPixel renderPixel(const float* src, const FCParams& p, const uint8_t* overlay, int gx, int gy) {
+    const float* s = src + p.srcBase + (ptrdiff_t)gy * p.srcRow + gx * 4;
+    FCPixel in{s[0], s[1], s[2], s[3]};
+    FCPixel o = fc_shade(in, p.source, p.mat, p.matIdentity, p.mix);
+    if (overlay) {
+        int idx = fc_overlay_index(p.ovEnabled, p.ovX, p.ovY, p.ovW, p.ovH, p.frameX0, p.frameTop, p.winX0 + gx, p.winY0 + gy);
+        if (idx >= 0) {
+            const uint8_t* t = overlay + (size_t)idx * 4;
+            o = fc_blend_overlay(o, t[0], t[1], t[2], t[3]);
         }
-        for (int r = 0; r < rows; ++r) {
-            const float* s = src + (ptrdiff_t)(ys + r) * srcRow;
-            const float* c = conv ? &buf[(size_t)r * w * 4] : s;
-            float* d = dst + (ptrdiff_t)(ys + r) * dstRow;
-            for (int x = 0; x < w; ++x) {
-                if (!p.enable) {
-                    std::memcpy(d + x * 4, s + x * 4, 4 * sizeof(float));
-                    continue;
-                }
-                falseColorPixel(s + x * 4, c + x * 4, p.lumaMode, p.mix, d + x * 4);
+    }
+    return o;
+}
+
+void cpuRender(const float* src, float* dst, const FCParams& p, const uint8_t* overlay) {
+    if (p.w <= 0 || p.h <= 0) return;
+    auto rows = [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            float* d = dst + p.dstBase + (ptrdiff_t)y * p.dstRow;
+            for (int x = 0; x < p.w; ++x) {
+                FCPixel o = renderPixel(src, p, overlay, x, y);
+                d[x * 4] = o.r; d[x * 4 + 1] = o.g; d[x * 4 + 2] = o.b; d[x * 4 + 3] = o.a;
             }
         }
-    }
-}
-}  // namespace
-
-void cpuRender(const float* src, ptrdiff_t srcRow, float* dst, ptrdiff_t dstRow, int w, int h,
-               const RenderParams& p, const ConvertFn* conv) {
-    if (w <= 0 || h <= 0) return;
-    const bool needConv = p.enable && conv && *conv;
-    const ConvertFn* cv = needConv ? conv : nullptr;
+    };
     unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    int n = (int)std::min<unsigned>(hw, (unsigned)std::max(1, h / 8));
-    if (n <= 1) {
-        renderRows(src, srcRow, dst, dstRow, w, 0, h, p, cv);
-        return;
-    }
+    int n = (int)std::min<unsigned>(hw, (unsigned)std::max(1, p.h / 8));
+    if (n <= 1) { rows(0, p.h); return; }
     std::vector<std::thread> th;
-    for (int i = 0; i < n; ++i) {
-        int y0 = (int)((long long)h * i / n), y1 = (int)((long long)h * (i + 1) / n);
-        th.emplace_back([=, &p] { renderRows(src, srcRow, dst, dstRow, w, y0, y1, p, cv); });
-    }
+    for (int i = 0; i < n; ++i)
+        th.emplace_back(rows, (int)((long long)p.h * i / n), (int)((long long)p.h * (i + 1) / n));
     for (auto& t : th) t.join();
 }
 

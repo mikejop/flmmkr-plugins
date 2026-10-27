@@ -34,7 +34,7 @@ if(FALSECOLOR_GPU_OPENCL OR FALSECOLOR_GPU_CUDA)
 endif()
 
 # --- core (no external dependencies) ---------------------------------------------------------
-add_library(fc_core STATIC falsecolor_core.cpp cpu_render.cpp)
+add_library(fc_core STATIC falsecolor_core.cpp cpu_render.cpp overlay.cpp)
 target_include_directories(fc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(Threads REQUIRED)
 target_link_libraries(fc_core PUBLIC Threads::Threads)
@@ -45,9 +45,10 @@ if(APPLE AND FALSECOLOR_GPU_METAL)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   file(MAKE_DIRECTORY "${FC_GEN_DIR}")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/falsecolor.metal" "${CMAKE_CURRENT_SOURCE_DIR}/palette_generated.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/falsecolor.metal" "${CMAKE_CURRENT_SOURCE_DIR}/fc_shared.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/palette_generated.h")
   execute_process(COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_metal.py"
-    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/falsecolor.metal" "${CMAKE_CURRENT_SOURCE_DIR}/palette_generated.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/falsecolor.metal" "${CMAKE_CURRENT_SOURCE_DIR}"
     "${FC_GEN_DIR}/falsecolor_metal_source.h" RESULT_VARIABLE _emb)
   if(NOT _emb EQUAL 0)
     message(FATAL_ERROR "embed_metal.py failed")
@@ -60,7 +61,7 @@ endif()
 
 # --- tests that need nothing but the core ---------------------------------------------------
 enable_testing()
-foreach(t ramp edges float render_path)
+foreach(t ramp edges float sources overlay render_path)
   add_executable(test_${t} tests/test_${t}.cpp)
   target_link_libraries(test_${t} PRIVATE fc_core)
   add_test(NAME test_${t} COMMAND test_${t})
@@ -83,34 +84,20 @@ target_compile_definitions(gen_palette PRIVATE FC_GENERATOR)
 target_include_directories(gen_palette PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_custom_target(regen_palette COMMAND gen_palette > "${CMAKE_CURRENT_SOURCE_DIR}/palette_generated.h" DEPENDS gen_palette)
 
-# --- OpenColorIO + plugin ---------------------------------------------------------------------
-# Prefer the static OCIO from scripts/build_ocio_static_macos.sh (no Homebrew dependency at runtime).
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ocio-static")
-  list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ocio-static")
-endif()
-find_package(OpenColorIO 2.4 CONFIG)
-if(NOT OpenColorIO_FOUND)
-  message(WARNING "OpenColorIO >= 2.4 not found (brew install opencolorio): plugin and OCIO tests are NOT built.")
-else()
-  add_library(fc_ocio STATIC ocio_pipeline.cpp)
-  target_link_libraries(fc_ocio PUBLIC fc_core OpenColorIO::OpenColorIO)
-  foreach(t aces versions)
-    add_executable(test_${t} tests/test_${t}.cpp)
-    target_link_libraries(test_${t} PRIVATE fc_ocio)
-    target_compile_definitions(test_${t} PRIVATE FALSECOLOR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-    add_test(NAME test_${t} COMMAND test_${t})
-    set_tests_properties(test_${t} PROPERTIES SKIP_RETURN_CODE 77)
-  endforeach()
+# Preview renderer (CPU pipeline + scale -> PPM), for checking the look without Resolve.
+add_executable(fc_preview tools/preview.cpp)
+target_link_libraries(fc_preview PRIVATE fc_core)
 
-  if(NOT EXISTS "${OFX_INCLUDE_DIR}/ofxCore.h")
-    message(WARNING "OpenFX headers not found in ${OFX_INCLUDE_DIR}. Run:\n"
-      "  git clone https://github.com/AcademySoftwareFoundation/openfx third_party/openfx\n"
-      "or pass -DOFX_INCLUDE_DIR=<path>/include. The plugin target is NOT built.")
-  else()
+# --- plugin -----------------------------------------------------------------------------------
+if(NOT EXISTS "${OFX_INCLUDE_DIR}/ofxCore.h")
+  message(WARNING "OpenFX headers not found in ${OFX_INCLUDE_DIR}. Run:\n"
+    "  git clone https://github.com/AcademySoftwareFoundation/openfx third_party/openfx\n"
+    "or pass -DOFX_INCLUDE_DIR=<path>/include. The plugin target is NOT built.")
+else()
     set(PLUGIN_SOURCES FalseColorPlugin.cpp)
     add_library(FalseColor MODULE ${PLUGIN_SOURCES})
     target_include_directories(FalseColor PRIVATE ${OFX_INCLUDE_DIR})
-    target_link_libraries(FalseColor PRIVATE fc_ocio)
+    target_link_libraries(FalseColor PRIVATE fc_core)
     if(UNIX AND NOT APPLE)
       target_link_libraries(FalseColor PRIVATE -static-libstdc++ -static-libgcc)
     endif()
@@ -141,5 +128,4 @@ else()
         COMMAND ${CMAKE_COMMAND} -E make_directory "${BUNDLE_DIR}/Contents/Win64"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:FalseColor>" "${BUNDLE_DIR}/Contents/Win64/FalseColor.ofx")
     endif()
-  endif()
 endif()

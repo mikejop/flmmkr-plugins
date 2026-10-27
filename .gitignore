@@ -6,3 +6,4 @@ installer/payload/
 __pycache__/
 .DS_Store
 *.pyc
+installer/releases/

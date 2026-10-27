@@ -1,97 +1,90 @@
-# FalseColor (OpenFX 1.4) para DaVinci Resolve — macOS
+# FLMMKR FALSE COLOR (OpenFX) para DaVinci Resolve
 
-Plugin de false color por luminância de display (15 faixas), com entrada ACES via OpenColorIO,
-float32, CPU de referência e Metal.
+False color por luminância em 15 faixas (Sistema de Zonas), com escala na tela, para macOS 13+
+(Apple Silicon e Intel), Windows 10+ e Linux. Processamento na GPU (Metal no macOS), com a CPU como
+rede de segurança. Não precisa de nenhum arquivo extra: todas as curvas estão embutidas no plugin.
 
-## Pré-requisitos (macOS)
-- DaVinci Resolve 18 ou superior (OpenFX).
-- Xcode com as Command Line Tools.
-- CMake 3.20+, Git, Python 3.
-- OpenColorIO 2.4.2+ (`brew install opencolorio`) — ou compilado do código-fonte.
-- Cabeçalhos OpenFX: `git clone https://github.com/AcademySoftwareFoundation/openfx third_party/openfx`
-  (ou `-DOFX_INCLUDE_DIR=<caminho>/include`).
+## Parâmetros
+| Parâmetro | O que faz |
+|---|---|
+| **Enable** | Desligado: a imagem passa sem alteração. |
+| **Source** | Curva/espaço de cor da imagem que chega no nó: Rec.709, Rec.2020, Apple Gamma 2.0, ACEScct (AP1), DVR WG/Rec709, DVR WG/Intermediate, Cineon Film Log. |
+| **Mix** | Mistura entre a imagem original (0) e o false color (1). |
+| **Escala** | Mostra a escala do Sistema de Zonas no lado esquerdo da imagem. |
+| **Legendas** | Mostra o significado de cada cor na escala (título, "TONS MÉDIOS" e o texto de cada faixa). |
+
+### Como o Source é usado
+1. O sinal é **decodificado com a curva do Source** (log ou gamma → luz linear).
+2. Os primários do Source são convertidos para Rec.709 (matriz 3×3; Bradford para o branco do ACES).
+3. Clamp em [0, 1].
+4. O resultado é **recodificado como sinal de vídeo Rec.709**:
+   - fontes de cena (log) — ACEScct, DVR WG/Intermediate, Cineon — usam a curva de câmera BT.709
+     (OETF). Cinza 18% ≈ 41% → faixa verde (bloco 7);
+   - fontes de display — Rec.2020, Apple Gamma 2.0, DVR WG/Rec709 — usam gamma 2.4;
+   - Rec.709 passa direto (o valor do sinal já é a medida).
+5. Y = luma Rec.709 desse sinal; `faixa = min(floor(Y × 15), 14)`; a régua vai de 0 a 109 IRE.
+
+Para log, o plugin não aplica tone mapping (DaVinci DRT ou ACES Output Transform): mede a exposição
+da cena numa curva Rec.709 padrão. As altas luzes, por isso, aparecem um pouco mais cedo no vermelho
+do que na imagem final com roll-off.
+
+### Sistema de Zonas
+Os 15 blocos vão de baixo (preto) para cima (estourado). Os blocos 7 a 9 (verde, verde acinzentado e
+rosa escuro — 44 a 65 IRE) formam a **zona de tons médios**, onde fica a pele humana. Na escala ela
+aparece com contorno branco e o texto "TONS MÉDIOS".
+
+## Onde colocar o nó
+- Escolha no **Source** o espaço em que a imagem está **naquele ponto do grafo**:
+  - timeline DaVinci Wide Gamut: "DVR WG/Intermediate";
+  - ACES (ACEScct): "ACEScct (AP1)";
+  - depois do Output Transform, ou numa timeline Rec.709: "Rec.709".
+- O Resolve só passa GPU para o plugin quando o projeto está com processamento em GPU (Metal no Mac).
+  O backend usado fica no log `~/Library/Logs/FalseColor.log`.
 
 ## Compilação
-A partir da pasta raiz (o caminho tem espaços; use aspas):
-
 ```bash
 cd "$HOME/Desktop/FLMMKR FALSE COLOR"
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+git clone --depth 1 https://github.com/AcademySoftwareFoundation/openfx third_party/openfx
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DFALSECOLOR_UNIVERSAL=ON
+cmake --build build
 ctest --test-dir build --output-on-failure
 ```
-**Se `test_ramp` ou `test_edges` falharem, não instale.** Testes pulados (código 77) aparecem como "Skipped".
+Não instale se `test_ramp`, `test_edges` ou `test_sources` falharem. Dependências: só os cabeçalhos
+OpenFX, a biblioteca padrão C++ e o Metal (macOS). O OpenColorIO não é mais usado.
 
-O kernel Metal é compilado em tempo de execução a partir do código embutido (`scripts/embed_metal.py`),
-então não precisa do Metal Toolchain offline. `palette_generated.h` é regenerado com
-`cmake --build build --target regen_palette` (a paleta vive em `falsecolor_core.cpp`).
+`build/fc_preview saida.ppm <source 0-6> <legendas 0|1>` renderiza uma rampa com a escala, para
+conferir o visual sem abrir o Resolve.
 
-### Estrutura do bundle
-```
-FalseColor.ofx.bundle/
-  Contents/
-    Info.plist
-    MacOS/FalseColor.ofx
-```
-`Win64/` e `Linux-x86-64/` só existem quando os builds Windows/Linux forem ativados.
+### Arquitetura
+- `fc_shared.h`: **única definição da matemática** (curvas, matriz, faixa, paleta, mistura da escala).
+  É compilado como C++ na CPU e como Metal Shading Language no kernel (embutido por
+  `scripts/embed_metal.py`). Os kernels OpenCL/CUDA preparados incluem o mesmo arquivo.
+- `falsecolor_core.*`: paleta (fonte da verdade, gera `palette_generated.h`), nomes dos Sources,
+  matrizes de primários, textos das faixas.
+- `overlay.*` + `font5x7.h`: desenho da escala (fonte bitmap própria, sem fontes do sistema).
+- `cpu_render.*`: renderizador de referência multithread. `metal_backend.*`: Metal.
+- `FalseColorPlugin.cpp`: OFX (descritor, parâmetros, render, fallback GPU → CPU por frame).
 
 ## Instalação
-```bash
-scripts/install_macos.sh
-```
-Copia para `/Library/OFX/Plugins/` (pede senha), remove a quarentena e aplica assinatura ad-hoc.
-Não copie pelo Finder (Gatekeeper). Feche e reabra o Resolve, vá à página Color, procure "OpenFX" na
-Effects Library e arraste "FalseColor" para um nó.
+Use os instaladores em `installer/releases` (gerados pelo CI) ou, no Mac, `scripts/install_macos.sh`.
+Depois feche e reabra o Resolve. Ao atualizar de uma versão anterior, os nós antigos perdem os
+parâmetros removidos (Input Space, ACES Version, OCIO Config, Output View, Luma Weights, Render Path).
 
-## Uso
-- **Display Rec.709 (pós-ODT):** nó depois do Output Transform; só faz clamp e false color.
-- **ACES completo:** nó antes do Output Transform; Input Space = ACEScg / ACEScct / ACES2065-1,
-  "OCIO Config" apontando para `configs/aces-1.x/config.ocio` ou `configs/aces-2.0/config.ocio`
-  (veja os `README.txt` dessas pastas), e "ACES Version" igual à do projeto
-  (Project Settings > Color Management).
-- **Output View** é um campo de texto (listas dinâmicas não são portáveis entre hosts). Vazio = primeira
-  view SDR Rec.709 da versão. As views disponíveis são escritas no log.
-- **Render Path:** Automático (Metal se o host oferecer), CPU, GPU. Com ACES, a conversão OCIO roda na CPU
-  e só o mapeamento de faixas roda na GPU (veja "Não implementado").
-- **Log:** `~/Library/Logs/FalseColor.log` (backend, dispositivo, ms/frame na troca de backend; todo frame
-  com `FALSECOLOR_VERBOSE=1` no ambiente do Resolve).
+## A verificar manualmente
+- **Apple Gamma 2.0**: não encontrei definição pública. Está implementado como potência 2,0 com
+  primários Rec.709.
+- **DVR WG/Rec709**: implementado como primários DaVinci Wide Gamut com gamma 2.4.
+- **Cineon Film Log**: curva Kodak (branco 685, preto 95, 0,002 densidade/código, gamma 0,6) com
+  primários Rec.709.
+- Propriedades OFX de GPU (`ofxGPURender.h`): `kOfxImageEffectPropMetalRenderSupported`,
+  `kOfxImageEffectPropMetalEnabled`, `kOfxImageEffectPropMetalCommandQueue`.
+- Referências usadas: ACEScct (ACES S-2016-001); DaVinci Intermediate e primários DWG (nota
+  "Wide Gamut Intermediate" da Blackmagic, via biblioteca Colour Science); matriz AP1→Rec.709 publicada.
 
-## Regra de faixa
-`band = min(floor(Y*15 + 1e-6), 14)`. O `1e-6` evita que limites exatos (17/255 = 1/15) caiam na faixa errada por
-arredondamento de float; é igual em CPU e kernels.
-
-## Validação
-Rampa de cinza 0–100% em display: as transições devem cair nos mesmos pontos da régua de referência.
-Repita para cada versão de ACES. Com Render Path = GPU, confirme no log "render backend: Metal"; se aparecer
-CPU ou "fallback", não está acelerado. Se o Resolve estiver em CPU, o plugin também fica em CPU.
-
-## Problemas comuns
-- Não aparece: nome do bundle, arquitetura, Resolve não reiniciado.
-- Bloqueado pelo Gatekeeper: rodar `scripts/install_macos.sh` de novo.
-- Resolve trava ao carregar: descritor/clipes; teste antes o exemplo "Invert" do OpenFX.
-- Cores erradas: paleta 0–255 sem dividir por 255. Imagem preta/transparente: alpha não copiado.
-- Lento: ACES 2.0 como gargalo (compare com Display Rec.709).
-- Dylibs do OCIO: o plugin liga dinamicamente ao OCIO do Homebrew; para distribuir, linke OCIO estático ou
-  embuta as dylibs no bundle.
+## Windows e Linux
+Compilados e testados (testes unitários) pelo GitHub Actions; ainda não instalados numa máquina real.
+Nesses sistemas o plugin roda na CPU (CUDA/OpenCL preparados, desativados). Windows: instala em
+`C:\Program Files\Common Files\OFX\Plugins\`; Linux: `/usr/OFX/Plugins`.
 
 ## Distribuição
-macOS exige assinatura Developer ID e notarização; sem isso o Gatekeeper bloqueia em outras máquinas.
-
-## Windows (preparado, não testado)
-Pasta de instalação: `C:\Program Files\Common Files\OFX\Plugins\`. O build exige Visual Studio 2022 com C++.
-`scripts/install_windows.bat` e o bloco `if(WIN32)` do CMake **não foram validados**. Linux: fora do escopo.
-
-## A verificar manualmente (nomes não confirmados)
-- Propriedades OFX de GPU em `ofxGPURender.h`: `kOfxImageEffectPropMetalRenderSupported`, `kOfxImageEffectPropMetalEnabled`,
-  `kOfxImageEffectPropMetalCommandQueue` (OpenCL/CUDA/OpenGL não são usadas). Conferir se `kOfxImagePropData` é o `id<MTLBuffer>`
-  nesse modo no Resolve.
-- Roles OCIO usados: `scene_linear` (ACEScg), `color_timing` (ACEScct), `aces_interchange` (ACES2065-1).
-- Heurística de views por versão (`"2.0"`, `"1.0"`, `"SDR"`, `"709"` no nome) e de detecção de versão (nome/descrição do config).
-- `BuiltinConfigRegistry` / URIs `ocio://...` (usados só nos testes, como alternativa quando não há config em `configs/`).
-- Transform built-in do ACES 2.0 citado na especificação ("ACES-OUTPUT - ACES2065-1_to_CIE-XYZ-D65 - SDR-100nit-REC709_2.0"): não usado; confira se existe no seu config.
-- `tests/reference/gray_ramp.png` e `falsecolor_bands.png`: não fornecidos.
-
-## Não implementado nesta fase
-- Geração de shader OCIO para MSL (`GpuShaderDesc`): a conversão ACES roda no CPU (buffer compartilhado) e o mapeamento de faixas na GPU.
-- OpenCL e CUDA: kernels preparados (`kernels/falsecolor.cl`, `.cu`), fora do CMake e do descritor.
-- Profundidades 8/16 bits (só float32 é anunciado). Imagens com `rowBytes` negativo não são tratadas.
+macOS exige assinatura Developer ID e notarização; sem isso o Gatekeeper pede clique direito > Abrir.
