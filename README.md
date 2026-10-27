@@ -1,8 +1,11 @@
 # FLMMKR FALSE COLOR (OpenFX) para DaVinci Resolve
 
-False color por luminância em 15 faixas (Sistema de Zonas), com escala na tela, para macOS 13+
-(Apple Silicon e Intel), Windows 10+ e Linux. Processamento na GPU (Metal no macOS), com a CPU como
-rede de segurança. Não precisa de nenhum arquivo extra: todas as curvas estão embutidas no plugin.
+False color por luminância em 15 faixas (Sistema de Zonas), com escala na tela. Plugin **OpenFX
+genérico**: macOS 13+ (Apple Silicon e Intel), Windows 10+ (x64) e Linux x86-64 (glibc 2.28+:
+Rocky/Alma 8+, Ubuntu 20.04+, Debian 10+, Fedora), em programas que aceitem efeitos OFX. Contextos
+Filter e General, imagens RGB ou RGBA de 8 bits, 16 bits ou float. Processamento na GPU (Metal no
+macOS, quando o programa entrega a imagem na GPU, como o Resolve) e na CPU multithread nos outros
+casos, com a mesma matemática. Não precisa de nenhum arquivo extra: todas as curvas estão embutidas.
 
 ## Parâmetros
 | Parâmetro | O que faz |
@@ -66,7 +69,17 @@ conferir o visual sem abrir o Resolve.
 - `FalseColorPlugin.cpp`: OFX (descritor, parâmetros, render, fallback GPU → CPU por frame).
 
 ## Instalação
-Use os instaladores em `installer/releases` (gerados pelo CI) ou, no Mac, `scripts/install_macos.sh`.
+- **Instalador** (um por sistema, em `installer/releases`, gerados pelo CI).
+- **Manual**: `FLMMKR-FALSE-COLOR-OFX-todos-os-sistemas.zip` traz um único `FalseColor.ofx.bundle`
+  com `MacOS/`, `Win64/` e `Linux-x86-64/` e o `INSTALAR.txt`. Copie a pasta para
+  `/Library/OFX/Plugins/` (macOS), `C:\Program Files\Common Files\OFX\Plugins\` (Windows) ou
+  `/usr/OFX/Plugins/` (Linux).
+- No Mac, para desenvolvimento: `scripts/install_macos.sh`.
+
+Compatibilidade binária: Windows com runtime C++ estático (o CI confere que só depende de
+`KERNEL32.dll`); Linux compilado em manylinux_2_28 com libstdc++ estática; macOS universal sem
+dependências fora do sistema. Log: `~/Library/Logs/FalseColor.log` (macOS),
+`%LOCALAPPDATA%\FLMMKR\FalseColor.log` (Windows), `~/.local/state/flmmkr/FalseColor.log` (Linux).
 Depois feche e reabra o Resolve. Ao atualizar de uma versão anterior, os nós antigos perdem os
 parâmetros removidos (Input Space, ACES Version, OCIO Config, Output View, Luma Weights, Render Path).
 
@@ -82,9 +95,8 @@ parâmetros removidos (Input Space, ACES Version, OCIO Config, Output View, Luma
   "Wide Gamut Intermediate" da Blackmagic, via biblioteca Colour Science); matriz AP1→Rec.709 publicada.
 
 ## Windows e Linux
-Compilados e testados (testes unitários) pelo GitHub Actions; ainda não instalados numa máquina real.
-Nesses sistemas o plugin roda na CPU (CUDA/OpenCL preparados, desativados). Windows: instala em
-`C:\Program Files\Common Files\OFX\Plugins\`; Linux: `/usr/OFX/Plugins`.
+Compilados e testados (testes unitários + instalação de teste) pelo GitHub Actions; ainda não
+abertos num programa real. Nesses sistemas o plugin roda na CPU (CUDA/OpenCL preparados, desativados).
 
 ## Distribuição
 macOS exige assinatura Developer ID e notarização; sem isso o Gatekeeper pede clique direito > Abrir.

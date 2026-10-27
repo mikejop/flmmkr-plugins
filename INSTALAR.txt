@@ -1,0 +1,22 @@
+FLMMKR FALSE COLOR - plugin OpenFX (OFX)
+=======================================
+
+Funciona em programas compatíveis com OpenFX que aceitem efeitos de imagem, no macOS 13+, no
+Windows 10+ (x64) e no Linux x86-64 (glibc 2.28 ou mais nova). Exemplos: DaVinci Resolve, Fusion,
+Nuke, Natron e Vegas. Testado até agora só no DaVinci Resolve (macOS).
+
+O mais fácil é usar o instalador do seu sistema. Para instalar à mão, copie a pasta inteira
+"FalseColor.ofx.bundle", sem mudar nada dentro dela, para a pasta OFX padrão do sistema:
+
+  macOS    /Library/OFX/Plugins/
+  Windows  C:\Program Files\Common Files\OFX\Plugins\
+  Linux    /usr/OFX/Plugins/
+
+O mesmo bundle serve para os três sistemas: cada um usa a sua subpasta (MacOS, Win64,
+Linux-x86-64). Programas que usam outra pasta podem ler a variável de ambiente OFX_PLUGIN_PATH.
+
+macOS: copie pelo Terminal, porque o Finder pode deixar a marca de quarentena:
+  sudo cp -R FalseColor.ofx.bundle /Library/OFX/Plugins/
+  sudo xattr -dr com.apple.quarantine /Library/OFX/Plugins/FalseColor.ofx.bundle
+
+Depois feche e reabra o programa. O efeito aparece como "FLMMKR FALSE COLOR" no grupo "FLMMKR".

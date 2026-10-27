@@ -22,6 +22,8 @@ endif()
 if(NOT MSVC)
   add_compile_options(-fno-fast-math)
 endif()
+# Windows: static C++ runtime, so the plugin loads in any OFX host without the VC++ redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(FALSECOLOR_GPU_METAL  "Metal backend (macOS)" ${APPLE})
 option(FALSECOLOR_GPU_OPENCL "OpenCL backend (prepared, disabled)" OFF)
@@ -61,7 +63,7 @@ endif()
 
 # --- tests that need nothing but the core ---------------------------------------------------
 enable_testing()
-foreach(t ramp edges float sources overlay render_path)
+foreach(t ramp edges float sources overlay formats render_path)
   add_executable(test_${t} tests/test_${t}.cpp)
   target_link_libraries(test_${t} PRIVATE fc_core)
   add_test(NAME test_${t} COMMAND test_${t})

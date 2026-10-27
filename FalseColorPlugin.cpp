@@ -5,10 +5,13 @@
 // support library has no Metal-buffer image handling. Sections that follow the OFX / Resolve
 // examples (descriptor, clips, render action, GPU properties) are marked [OFX].
 //
-// Rendering always goes to the GPU (Metal) when the host provides it. The CPU renderer is only the
+// Generic OpenFX: Filter and General contexts, RGB/RGBA, 8-bit, 16-bit and float, on macOS, Windows
+// and Linux. Rendering always goes to the GPU (Metal) when the host provides it. The CPU renderer is only the
 // safety net: hosts without Metal, or a GPU error on a frame (that frame is redone on the CPU).
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -83,8 +86,12 @@ OfxStatus describe(OfxImageEffectHandle effect) {
     gEffect->getPropertySet(effect, &p);
     gProp->propSetString(p, kOfxPropLabel, 0, "FLMMKR FALSE COLOR");
     gProp->propSetString(p, kOfxImageEffectPluginPropGrouping, 0, "FLMMKR");
+    // Generic OFX: any host that loads OpenFX image effects, on macOS, Windows and Linux.
     gProp->propSetString(p, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
+    gProp->propSetString(p, kOfxImageEffectPropSupportedContexts, 1, kOfxImageEffectContextGeneral);
     gProp->propSetString(p, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
+    gProp->propSetString(p, kOfxImageEffectPropSupportedPixelDepths, 1, kOfxBitDepthShort);
+    gProp->propSetString(p, kOfxImageEffectPropSupportedPixelDepths, 2, kOfxBitDepthByte);
     gProp->propSetInt(p, kOfxImageEffectPropSupportsTiles, 0, 1);
     gProp->propSetInt(p, kOfxImageEffectPropSupportsMultipleClipDepths, 0, 0);
     gProp->propSetString(p, kOfxImageEffectPluginRenderThreadSafety, 0, kOfxImageEffectRenderInstanceSafe);
@@ -104,13 +111,15 @@ OfxPropertySetHandle defineBool(OfxParamSetHandle ps, const char* name, const ch
     return pp;
 }
 
-// [OFX] DescribeInContext: clips + parameters
+// [OFX] DescribeInContext (Filter and General use the same two clips): clips + parameters
 OfxStatus describeInContext(OfxImageEffectHandle effect) {
     OfxPropertySetHandle cp;
-    gEffect->clipDefine(effect, kOfxImageEffectSimpleSourceClipName, &cp);
-    gProp->propSetString(cp, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
-    gEffect->clipDefine(effect, kOfxImageEffectOutputClipName, &cp);
-    gProp->propSetString(cp, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
+    for (const char* clip : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+        gEffect->clipDefine(effect, clip, &cp);
+        gProp->propSetString(cp, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
+        gProp->propSetString(cp, kOfxImageEffectPropSupportedComponents, 1, kOfxImageComponentRGB);
+        gProp->propSetInt(cp, kOfxImageEffectPropSupportsTiles, 0, 1);
+    }
 
     OfxParamSetHandle ps;
     gEffect->getParamSet(effect, &ps);
@@ -178,6 +187,8 @@ struct Img {
     void* data = nullptr;
     int bounds[4] = {0, 0, 0, 0};
     int rowBytes = 0;
+    int components = 4;        // 3 = RGB, 4 = RGBA
+    int bytesPerComponent = 4; // 1 = 8-bit, 2 = 16-bit, 4 = float
 };
 
 bool fetchImage(OfxImageClipHandle clip, double t, Img& img) {
@@ -185,6 +196,17 @@ bool fetchImage(OfxImageClipHandle clip, double t, Img& img) {
     gProp->propGetPointer(img.props, kOfxImagePropData, 0, &img.data);
     for (int i = 0; i < 4; ++i) gProp->propGetInt(img.props, kOfxImagePropBounds, i, &img.bounds[i]);
     gProp->propGetInt(img.props, kOfxImagePropRowBytes, 0, &img.rowBytes);
+    char* depth = nullptr;
+    char* comps = nullptr;
+    gProp->propGetString(img.props, kOfxImageEffectPropPixelDepth, 0, &depth);
+    gProp->propGetString(img.props, kOfxImageEffectPropComponents, 0, &comps);
+    if (depth && !std::strcmp(depth, kOfxBitDepthByte)) img.bytesPerComponent = 1;
+    else if (depth && !std::strcmp(depth, kOfxBitDepthShort)) img.bytesPerComponent = 2;
+    else if (depth && !std::strcmp(depth, kOfxBitDepthFloat)) img.bytesPerComponent = 4;
+    else img.bytesPerComponent = 0;
+    if (comps && !std::strcmp(comps, kOfxImageComponentRGB)) img.components = 3;
+    else if (comps && !std::strcmp(comps, kOfxImageComponentRGBA)) img.components = 4;
+    else img.components = 0;
     return img.data != nullptr;
 }
 
@@ -235,6 +257,14 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
     Img src, dst;
     if (!fetchImage(inst->src, t, src)) return kOfxStatFailed;
     if (!fetchImage(inst->dst, t, dst)) { gEffect->clipReleaseImage(src.props); return kOfxStatFailed; }
+    if (!src.components || !src.bytesPerComponent || src.components != dst.components ||
+        src.bytesPerComponent != dst.bytesPerComponent) {
+        fc::logLine("formato de imagem nao suportado (use RGB/RGBA de 8, 16 ou 32 bits)");
+        gEffect->clipReleaseImage(src.props);
+        gEffect->clipReleaseImage(dst.props);
+        return kOfxStatErrImageFormat;
+    }
+    const bool floatRGBA = src.components == 4 && src.bytesPerComponent == 4;
 
     // ---- parameters -> FCParams (identical for CPU and GPU) -----------------------------------
     FCParams p{};
@@ -273,7 +303,7 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
     fc::RunResult result{fc::Backend::Cpu, false, ""};
 
 #if defined(__APPLE__)
-    if (hostGpuBuffers) {
+    if (hostGpuBuffers && floatRGBA) {
         // Images are id<MTLBuffer>. The Metal runner uses the HOST's command queue (no own context).
         if (!inst->metal || inst->metalQueue != queue) {
             inst->metal.reset(new fc::MetalRunner(queue));
@@ -302,8 +332,13 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
         result = fc::runWithFallback(fc::Backend::Metal, gpuPath, cpuViaStaging);
     } else
 #endif
-    {
+    if (floatRGBA) {
         fc::cpuRender((const float*)src.data, (float*)dst.data, p, ovData);
+    } else {  // 8/16-bit or RGB images from hosts other than Resolve
+        const int pix = src.components * src.bytesPerComponent;
+        const uint8_t* sw = (const uint8_t*)src.data + (ptrdiff_t)(rw[1] - src.bounds[1]) * src.rowBytes + (ptrdiff_t)(rw[0] - src.bounds[0]) * pix;
+        uint8_t* dw = (uint8_t*)dst.data + (ptrdiff_t)(rw[1] - dst.bounds[1]) * dst.rowBytes + (ptrdiff_t)(rw[0] - dst.bounds[0]) * pix;
+        fc::cpuRenderAny(sw, src.rowBytes, dw, dst.rowBytes, src.components, src.bytesPerComponent, p, ovData);
     }
 
     if (result.fellBack) fc::logLine("GPU falhou neste frame, refeito na CPU: " + result.error);

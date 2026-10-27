@@ -1,4 +1,6 @@
-# Runs on GitHub Actions. macOS is also verified locally; Windows/Linux are verified only by the CI build + unit tests.
+# Builds the OFX plugin for macOS (universal), Windows (x64) and Linux (x86-64, glibc 2.28+), runs the
+# unit tests on each, packs one multi-platform FalseColor.ofx.bundle for manual install, and builds +
+# self-tests a graphical installer per OS.
 name: build-and-package
 on: { workflow_dispatch: {}, push: { tags: ["v*"] } }
 jobs:
@@ -7,24 +9,69 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,      name: mac,   extra: "-DFALSECOLOR_UNIVERSAL=ON" }
-          - { os: windows-2022,  name: win,   extra: "" }
-          - { os: ubuntu-22.04,  name: linux, extra: "" }
+          - { os: macos-14,     name: mac, extra: "-DFALSECOLOR_UNIVERSAL=ON" }
+          - { os: windows-2022, name: win, extra: "" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: OpenFX headers
         run: git clone --depth 1 https://github.com/AcademySoftwareFoundation/openfx third_party/openfx
-      - name: Build plugin
+      - name: Build and test
         shell: bash
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DOFX_INCLUDE_DIR="$PWD/third_party/openfx/include" ${{ matrix.extra }}
           cmake --build build --config Release
           ctest --test-dir build -C Release --output-on-failure
+      - name: Check Windows binary has no VC++ runtime dependency
+        if: matrix.name == 'win'
+        shell: bash
+        run: |
+          DUMPBIN=$(find "/c/Program Files/Microsoft Visual Studio" -name dumpbin.exe -path "*Hostx64/x64*" | head -1)
+          "$DUMPBIN" //dependents build/FalseColor.ofx.bundle/Contents/Win64/FalseColor.ofx | tee deps.txt
+          ! grep -i -E "msvcp|vcruntime" deps.txt
       - uses: actions/upload-artifact@v4
         with: { name: "bundle-${{ matrix.name }}", path: build/FalseColor.ofx.bundle }
+
+  plugin-linux:
+    # manylinux_2_28 (AlmaLinux 8, glibc 2.28): the binary loads on Rocky/Alma 8+, Ubuntu 20.04+,
+    # Debian 10+, Fedora and the VFX reference platform.
+    runs-on: ubuntu-22.04
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: OpenFX headers
+        run: git clone --depth 1 https://github.com/AcademySoftwareFoundation/openfx third_party/openfx
+      - name: Build and test
+        run: |
+          /opt/python/cp312-cp312/bin/python -m pip install cmake
+          CMAKE=/opt/python/cp312-cp312/bin/cmake
+          CTEST=/opt/python/cp312-cp312/bin/ctest
+          $CMAKE -B build -DCMAKE_BUILD_TYPE=Release -DOFX_INCLUDE_DIR="$PWD/third_party/openfx/include"
+          $CMAKE --build build
+          $CTEST --test-dir build --output-on-failure
+          echo "GLIBC symbols required:" && objdump -T build/FalseColor.ofx.bundle/Contents/Linux-x86-64/FalseColor.ofx | grep -o "GLIBC_[0-9.]*" | sort -uV | tail -3
+      - uses: actions/upload-artifact@v4
+        with: { name: "bundle-linux", path: build/FalseColor.ofx.bundle }
+
+  bundle:
+    # One FalseColor.ofx.bundle with MacOS/, Win64/ and Linux-x86-64/ inside: copy it into the OFX
+    # plugin folder of any OS by hand (see INSTALAR.txt).
+    needs: [plugin, plugin-linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: "bundle-*", path: bundles }
+      - name: Assemble multi-platform bundle
+        run: |
+          python3 scripts/assemble_payload.py --mac bundles/bundle-mac --win bundles/bundle-win --linux bundles/bundle-linux
+          mkdir -p out && cp -R installer/payload/FalseColor.ofx.bundle out/ && cp INSTALAR.txt out/
+          chmod +x out/FalseColor.ofx.bundle/Contents/*/FalseColor.ofx
+      - uses: actions/upload-artifact@v4
+        with: { name: "ofx-bundle-all-platforms", path: out }
+
   installer:
-    needs: plugin
+    needs: [plugin, plugin-linux]
     strategy:
       fail-fast: false
       matrix:
@@ -45,8 +92,6 @@ jobs:
           python scripts/assemble_payload.py --mac bundles/bundle-mac --win bundles/bundle-win --linux bundles/bundle-linux
           pip install pyinstaller
           python installer/build_installer.py
-      - uses: actions/upload-artifact@v4
-        with: { name: "installer-${{ matrix.name }}", path: installer/dist-out }
       - name: Self-test the packaged installer (real install into a temp folder)
         shell: bash
         run: |
@@ -59,3 +104,5 @@ jobs:
           F="$D/FalseColor.ofx.bundle/Contents/$SUB/FalseColor.ofx"
           test -f "$F" && test ! -L "$F" && ls -la "$F"
           if [ "${{ matrix.name }}" = mac ]; then lipo -archs "$F" | grep -q x86_64 && lipo -archs "$F" | grep -q arm64; fi
+      - uses: actions/upload-artifact@v4
+        with: { name: "installer-${{ matrix.name }}", path: installer/dist-out }
