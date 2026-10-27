@@ -21,9 +21,11 @@
 #include "ofxGPURender.h"
 #include "ofxImageEffect.h"
 #include "ofxParam.h"
+#include "ofxMessage.h"
 #include "ofxProperty.h"
 
 #include "cpu_render.h"
+#include "flmmkr_update.h"
 #include "falsecolor_core.h"
 #include "overlay.h"
 #include "plugin_log.h"
@@ -39,6 +41,14 @@ static OfxHost* gHost = nullptr;
 static OfxPropertySuiteV1* gProp = nullptr;
 static OfxImageEffectSuiteV1* gEffect = nullptr;
 static OfxParameterSuiteV1* gParam = nullptr;
+static OfxMessageSuiteV1* gMessage = nullptr;  // optional (host may not provide it)
+
+#ifndef FLMMKR_PLUGIN_VERSION
+#define FLMMKR_PLUGIN_VERSION "dev"
+#endif
+#ifndef FLMMKR_BUILD_DATE
+#define FLMMKR_BUILD_DATE "?"
+#endif
 
 namespace {
 
@@ -145,6 +155,22 @@ OfxStatus describeInContext(OfxImageEffectHandle effect) {
 
     defineBool(ps, kPScale, "Escala", 1, "Mostra a escala do Sistema de Zonas no lado esquerdo da imagem.");
     defineBool(ps, kPLabels, "Legendas", 1, "Mostra o significado de cada cor na escala.");
+
+    // Version + "Procurar atualizações" (every FLMMKR plugin has this button: flmmkr_update.h).
+    {
+        OfxPropertySetHandle vp;
+        gParam->paramDefine(ps, kOfxParamTypeString, "flmmkrVersion", &vp);
+        gProp->propSetString(vp, kOfxPropLabel, 0, "Versão");
+        gProp->propSetString(vp, kOfxParamPropStringMode, 0, kOfxParamStringIsLabel);
+        gProp->propSetString(vp, kOfxParamPropDefault, 0, FLMMKR_PLUGIN_VERSION " (" FLMMKR_BUILD_DATE ")");
+        gProp->propSetInt(vp, kOfxParamPropEnabled, 0, 0);
+        gProp->propSetInt(vp, kOfxParamPropAnimates, 0, 0);
+        gProp->propSetInt(vp, kOfxParamPropPersistant, 0, 0);
+        OfxPropertySetHandle bp;
+        gParam->paramDefine(ps, kOfxParamTypePushButton, "flmmkrUpdate", &bp);
+        gProp->propSetString(bp, kOfxPropLabel, 0, "Procurar atualizações");
+        gProp->propSetString(bp, kOfxParamPropHint, 0, "Abre o FLMMKR-FX, que procura uma versão nova dos plugins FLMMKR e instala.");
+    }
     return kOfxStatOK;
 }
 
@@ -180,6 +206,19 @@ OfxStatus isIdentity(OfxImageEffectHandle effect, OfxPropertySetHandle in, OfxPr
         return kOfxStatReplyYes;
     }
     return kOfxStatReplyDefault;
+}
+
+// [OFX] InstanceChanged: the "Procurar atualizações" button.
+OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
+    char* name = nullptr;
+    gProp->propGetString(in, kOfxPropName, 0, &name);
+    if (!name || std::strcmp(name, "flmmkrUpdate") != 0) return kOfxStatReplyDefault;
+    std::string err;
+    if (!flmmkr::launchUpdater("FLMMKR FALSE COLOR", err)) {
+        fc::logLine(err);
+        if (gMessage) gMessage->message(effect, kOfxMessageError, nullptr, "%s", err.c_str());
+    }
+    return kOfxStatOK;
 }
 
 struct Img {
@@ -364,6 +403,7 @@ OfxStatus pluginMain(const char* action, const void* handle, OfxPropertySetHandl
             gProp = (OfxPropertySuiteV1*)gHost->fetchSuite(gHost->host, kOfxPropertySuite, 1);
             gEffect = (OfxImageEffectSuiteV1*)gHost->fetchSuite(gHost->host, kOfxImageEffectSuite, 1);
             gParam = (OfxParameterSuiteV1*)gHost->fetchSuite(gHost->host, kOfxParameterSuite, 1);
+            gMessage = (OfxMessageSuiteV1*)gHost->fetchSuite(gHost->host, kOfxMessageSuite, 1);
             return (gProp && gEffect && gParam) ? kOfxStatOK : kOfxStatErrMissingHostFeature;
         }
         if (!std::strcmp(action, kOfxActionUnload)) return kOfxStatOK;
@@ -373,6 +413,7 @@ OfxStatus pluginMain(const char* action, const void* handle, OfxPropertySetHandl
         if (!std::strcmp(action, kOfxActionDestroyInstance)) return destroyInstance(effect);
         if (!std::strcmp(action, kOfxImageEffectActionIsIdentity)) return isIdentity(effect, in, out);
         if (!std::strcmp(action, kOfxImageEffectActionRender)) return render(effect, in);
+        if (!std::strcmp(action, kOfxActionInstanceChanged)) return instanceChanged(effect, in);
         // RoD = input RoD and RoI = output RoI (point operator + overlay drawn inside the frame):
         // the host defaults apply.
     } catch (const std::exception& e) {
@@ -386,7 +427,7 @@ OfxStatus pluginMain(const char* action, const void* handle, OfxPropertySetHandl
 
 void setHost(OfxHost* h) { gHost = h; }
 
-OfxPlugin gPlugin = {kOfxImageEffectPluginApi, 1, kPluginId, 1, 1, setHost, pluginMain};
+OfxPlugin gPlugin = {kOfxImageEffectPluginApi, 1, kPluginId, 1, 2, setHost, pluginMain};
 
 }  // namespace
 
