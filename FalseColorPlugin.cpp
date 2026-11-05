@@ -156,7 +156,7 @@ OfxStatus describeInContext(OfxImageEffectHandle effect) {
     defineBool(ps, kPScale, "Escala", 1, "Mostra a escala do Sistema de Zonas no lado esquerdo da imagem.");
     defineBool(ps, kPLabels, "Legendas", 1, "Mostra o significado de cada cor na escala.");
 
-    // Version + "Procurar atualizações" (every FLMMKR plugin has this button: flmmkr_update.h).
+    // Version + "Atualizar" (every FLMMKR plugin has this button: flmmkr_update.h).
     {
         OfxPropertySetHandle vp;
         gParam->paramDefine(ps, kOfxParamTypeString, "flmmkrVersion", &vp);
@@ -168,7 +168,7 @@ OfxStatus describeInContext(OfxImageEffectHandle effect) {
         gProp->propSetInt(vp, kOfxParamPropPersistant, 0, 0);
         OfxPropertySetHandle bp;
         gParam->paramDefine(ps, kOfxParamTypePushButton, "flmmkrUpdate", &bp);
-        gProp->propSetString(bp, kOfxPropLabel, 0, "Procurar atualizações");
+        gProp->propSetString(bp, kOfxPropLabel, 0, "Atualizar");
         gProp->propSetString(bp, kOfxParamPropHint, 0, "Abre o FLMMKR-FX, que procura uma versão nova dos plugins FLMMKR e instala.");
     }
     return kOfxStatOK;
@@ -208,7 +208,7 @@ OfxStatus isIdentity(OfxImageEffectHandle effect, OfxPropertySetHandle in, OfxPr
     return kOfxStatReplyDefault;
 }
 
-// [OFX] InstanceChanged: the "Procurar atualizações" button.
+// [OFX] InstanceChanged: the "Atualizar" button.
 OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHandle in) {
     char* name = nullptr;
     gProp->propGetString(in, kOfxPropName, 0, &name);
